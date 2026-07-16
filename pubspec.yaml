@@ -1,0 +1,25 @@
+name: terapi
+description: "A new Flutter project."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # Tambahkan library di bawah ini, pastikan sejajar dengan flutter
+  firebase_core: ^2.24.2
+  firebase_database: ^10.4.0
+  intl: ^0.19.0 # Untuk format tanggal seperti di Kotlin
+  app_settings: ^7.0.0 # Untuk membuka pengaturan Bluetooth bawaan HP
+  flutter_blue_plus: ^1.31.0
+  
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
