@@ -1,7 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:intl/intl.dart';
+import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
@@ -12,21 +17,25 @@ class MainScreen extends StatefulWidget {
 
 class _MainScreenState extends State<MainScreen> {
   final String dbUrl = "https://terapi-2278e-default-rtdb.asia-southeast1.firebasedatabase.app";
-  late DatabaseReference _monitoringRef;
   late DatabaseReference _riwayatRef;
-  late StreamSubscription _sensorSubscription;
+
+  BluetoothConnection? _connection;
+  String _buffer = "";
 
   bool _isSesiAktif = false;
   int _detikBerjalan = 0;
   Timer? _timer;
   DateTime? _waktuMulaiTerapi;
+  
+  // Variabel untuk Target Waktu Timer (Default 20 menit)
+  int _targetMenit = 20; 
 
-  // Variabel data realtime
   double _suhuTerakhir = 0.0;
   double _emgRmsTerakhir = 0.0;
-  int _intensitasTerakhir = 0;
+  int _intensitasTerakhir = 0; 
+  String _statusNyeriIoT = "Tidak Nyeri";
+  int _skalaNyeri = 1; 
   
-  // List untuk menampung riwayat data EMG agar grafik bisa bergerak
   List<double> _emgHistory = []; 
 
   final Color _primaryColor = const Color(0xFFC2185B);
@@ -35,101 +44,264 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
-    _monitoringRef = FirebaseDatabase.instanceFor(app: FirebaseDatabase.instance.app, databaseURL: dbUrl)
-        .ref("monitoring_terapi/dismenore_01");
     _riwayatRef = FirebaseDatabase.instanceFor(app: FirebaseDatabase.instance.app, databaseURL: dbUrl)
         .ref("riwayat_terapi/dismenore_01");
+  }
 
-    // Mendengarkan perubahan data dari IoT secara realtime
-    _sensorSubscription = _monitoringRef.onValue.listen((event) {
-      if (event.snapshot.value != null) {
-        Map data = event.snapshot.value as Map;
-        
+  void _onDataReceived(Uint8List data) {
+    _buffer += ascii.decode(data);
+    if (_buffer.contains('\n')) {
+      List<String> lines = _buffer.split('\n');
+      for (int i = 0; i < lines.length - 1; i++) {
+        _processLine(lines[i]);
+      }
+      _buffer = lines.last;
+    }
+  }
+
+  void _processLine(String line) {
+    try {
+      if (line.contains("Suhu:") && line.contains("EMG:")) {
+        List<String> parts = line.split('|');
+        if (parts.length >= 4) {
+          String suhuStr = parts[0].replaceAll(RegExp(r'[^0-9.]'), '');
+          String emgStr = parts[1].replaceAll(RegExp(r'[^0-9.]'), '');
+          String statusStr = parts[2].replaceAll("Status:", "").trim();
+          String pwmStr = parts[3].replaceAll(RegExp(r'[^0-9.]'), '');
+
+          if (mounted) {
+            setState(() {
+              _suhuTerakhir = double.tryParse(suhuStr) ?? 0.0;
+              _emgRmsTerakhir = double.tryParse(emgStr) ?? 0.0;
+              _statusNyeriIoT = statusStr;
+              
+              int pwm = int.tryParse(pwmStr) ?? 0;
+              _intensitasTerakhir = ((pwm / 255.0) * 100).toInt();
+              _skalaNyeri = (_intensitasTerakhir / 10.0).ceil().clamp(1, 10);
+
+              _emgHistory.add(_emgRmsTerakhir);
+              if (_emgHistory.length > 30) {
+                _emgHistory.removeAt(0); 
+              }
+            });
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint("Error parsing data: $e");
+    }
+  }
+
+void _mulaiSesi() async {
+    // 1. MINTA IZIN BLUETOOTH SECARA PAKSA KE HP (WAJIB UNTUK ANDROID 12+)
+    Map<Permission, PermissionStatus> statuses = await [
+      Permission.bluetoothConnect,
+      Permission.bluetoothScan,
+      Permission.location,
+    ].request();
+
+    // Jika user menolak izin, hentikan proses
+    if (statuses[Permission.bluetoothConnect]!.isDenied) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Izin Bluetooth ditolak! Tidak bisa menyambung.")));
+      return;
+    }
+
+    // Membungkus SELURUH proses koneksi untuk mencegah Silent Error
+    try {
+      // 2. Cek daftar perangkat yang sudah di-pairing
+      List<BluetoothDevice> bonded = await FlutterBluetoothSerial.instance.getBondedDevices();
+      BluetoothDevice? target;
+      
+      for(var d in bonded) {
+        if(d.name != null && d.name!.contains("ESP32_Heater_Fuzzy")) {
+          target = d; 
+          break;
+        }
+      }
+
+      if(target == null) {
+         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Alat belum dipasangkan! Cek pengaturan Bluetooth.")));
+         return;
+      }
+
+      setState(() {
+        _isSesiAktif = true;
+        _waktuMulaiTerapi = DateTime.now();
+        _emgHistory.clear(); 
+        _buffer = "";
+      });
+
+      // 3. Proses Koneksi
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Menghubungkan ke IoT...")));
+      
+      _connection = await BluetoothConnection.toAddress(target.address);
+      
+      // Kirim perintah START ke ESP32
+      _connection!.output.add(Uint8List.fromList(utf8.encode("START\n")));
+      await _connection!.output.allSent;
+      
+BluetoothConnection activeConnection = _connection!;
+      
+      activeConnection.input!.listen(_onDataReceived).onDone(() {
+         // Pastikan event onDone ini BUKAN dari sisa koneksi lama yang nyangkut
+         if (_isSesiAktif && mounted && _connection == activeConnection) {
+            _hentikanSesi(otomatis: false); 
+         }
+      });
+
+      // 4. Jalankan Timer
+      _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
         if (mounted) {
-          setState(() {
-            _suhuTerakhir = (data['suhu'] ?? 0.0).toDouble();
-            _emgRmsTerakhir = (data['emg_rms'] ?? 0.0).toDouble();
-            _intensitasTerakhir = (data['intensitas_fuzzy'] ?? 0) as int;
-
-            // Tambahkan data baru ke grafik
-            _emgHistory.add(_emgRmsTerakhir);
-            // Batasi agar grafik tidak terlalu panjang (maksimal 30 titik terakhir)
-            if (_emgHistory.length > 30) {
-              _emgHistory.removeAt(0); 
+          setState(() { 
+            _detikBerjalan++; 
+            if (_detikBerjalan >= _targetMenit * 60) {
+              _hentikanSesi(otomatis: true);
             }
           });
         }
-      }
-    });
+      });
+      
+      ScaffoldMessenger.of(context).hideCurrentSnackBar(); // Hapus pesan "menghubungkan"
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Terhubung. Terapi dimulai selama $_targetMenit menit.")));
+      
+    } catch (e) {
+      // JIKA ADA ERROR SISTEM, PESANNYA AKAN MUNCUL DI SINI
+      setState(() { _isSesiAktif = false; });
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text("Gagal: $e"), 
+        duration: const Duration(seconds: 4), // Tampil lebih lama agar bisa dibaca
+      ));
+    }
   }
-
-  void _mulaiSesi() {
-    setState(() {
-      _isSesiAktif = true;
-      _waktuMulaiTerapi = DateTime.now();
-      _emgHistory.clear(); // Bersihkan grafik saat sesi baru
-    });
-    _monitoringRef.child("status_aktif").set(true);
-
-    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      setState(() { _detikBerjalan++; });
-    });
-  }
-
-  void _hentikanSesi() {
+  // Menambahkan parameter 'otomatis' untuk membedakan dihentikan user vs waktu habis
+void _hentikanSesi({bool otomatis = false}) async {
+    // 1. AMANKAN DATA SEGERA (Jangan tunggu Bluetooth terputus!)
+    int durasiFinal = _detikBerjalan; 
+    
+    // 2. Matikan timer
     _timer?.cancel();
-    _monitoringRef.child("status_aktif").set(false);
-    _simpanKeRiwayat();
+    _timer = null;
 
-    setState(() {
-      _isSesiAktif = false;
-      _detikBerjalan = 0;
-    });
+    // 3. Simpan ke Firebase langsung menggunakan durasi yang diamankan
+    _simpanKeRiwayat(durasiFinal: durasiFinal, otomatis: otomatis);
+
+    // 4. Reset UI segera agar tombol kembali ke "Mulai Sesi" dengan mulus
+    if (mounted) {
+      setState(() {
+        _isSesiAktif = false;
+        _detikBerjalan = 0;
+        _emgHistory.clear(); 
+        _suhuTerakhir = 0.0;
+        _emgRmsTerakhir = 0.0;
+        _intensitasTerakhir = 0;
+        _skalaNyeri = 1;
+        _waktuMulaiTerapi = null; // Cegah data nyangkut ke sesi berikutnya
+      });
+    }
+
+    // 5. Putus koneksi IoT di latar belakang
+    try {
+      if (_connection != null && _connection!.isConnected) {
+        _connection!.output.add(Uint8List.fromList(utf8.encode("STOP\n")));
+        await _connection!.output.allSent;
+      }
+    } catch (e) {
+      debugPrint("Gagal kirim perintah STOP: $e");
+    } finally {
+      // Gunakan dispose() agar langsung diputus paksa tanpa loading
+      _connection?.dispose(); 
+      _connection = null;
+    }
   }
-
-  String _formatWaktu(int totalDetik) {
+String _formatWaktu(int totalDetik) {
     int jam = totalDetik ~/ 3600;
     int menit = (totalDetik % 3600) ~/ 60;
     int detik = totalDetik % 60;
     return '${jam.toString().padLeft(2, '0')}:${menit.toString().padLeft(2, '0')}:${detik.toString().padLeft(2, '0')}';
   }
 
-  void _simpanKeRiwayat() {
-    if (_waktuMulaiTerapi == null) return;
+// Tambahkan parameter 'durasiFinal' yang wajib diisi (required)
+  Future<void> _simpanKeRiwayat({required int durasiFinal, bool otomatis = false}) async {
+    print("DEBUG: Fungsi simpan dipanggil. WaktuMulai: $_waktuMulaiTerapi");
 
-    String tanggalTeks = DateFormat("dd MMM yyyy • HH:mm", "id_ID").format(_waktuMulaiTerapi!);
-    String durasiTeks = _formatWaktu(_detikBerjalan);
-    
-    String statusNyeri = "Ringan";
-    if (_intensitasTerakhir >= 70) {
-      statusNyeri = "Berat";
-    } else if (_intensitasTerakhir >= 30) {
-      statusNyeri = "Sedang";
+    if (_waktuMulaiTerapi == null) {
+      print("DEBUG: Gagal! _waktuMulaiTerapi null.");
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Error: Waktu mulai tidak terekam!")));
+      return;
     }
 
+    String tanggalTeks = DateFormat("dd MMM yyyy", "id_ID").format(_waktuMulaiTerapi!);
+    // AMBIL WAKTU SAAT INI SEBAGAI WAKTU SELESAI
+    String waktuSelesai = DateFormat("HH:mm", "id_ID").format(DateTime.now()); 
+    String durasiTeks = _formatWaktu(durasiFinal);
+    
     Map<String, dynamic> dataRiwayat = {
       "tanggal": tanggalTeks,
+      "waktu": waktuSelesai, // <--- TAMBAHKAN INI
       "durasi": durasiTeks,
       "emg": _emgRmsTerakhir.toString(),
       "suhu": _suhuTerakhir.toString(),
-      "statusNyeri": statusNyeri
+      "statusNyeri": _statusNyeriIoT
     };
 
-    _riwayatRef.push().set(dataRiwayat).then((_) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Sesi disimpan ke Riwayat")));
-    });
+    print("DEBUG: Mencoba kirim ke $_riwayatRef dengan data: $dataRiwayat");
+
+    try {
+      await _riwayatRef.push().set(dataRiwayat);
+      print("DEBUG: Berhasil push ke Firebase!");
+      
+      if (mounted) {
+        if (otomatis) {
+          _tampilkanDialogSelesai();
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Sesi dihentikan dan disimpan ke Riwayat")));
+        }
+      }
+    } catch (error) {
+      print("DEBUG: Gagal push: $error");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Gagal: $error")));
+      }
+    }
+  }
+  // Fungsi untuk menampilkan Pop-up saat timer habis
+  void _tampilkanDialogSelesai() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: const Row(
+            children: [
+              Icon(Icons.check_circle, color: Colors.green, size: 28),
+              SizedBox(width: 10),
+              Text("Terapi Selesai"),
+            ],
+          ),
+          content: Text("Waktu terapi $_targetMenit menit telah berakhir. Data sesi telah otomatis disimpan ke riwayat Anda."),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: Text("Tutup", style: TextStyle(color: _primaryColor, fontWeight: FontWeight.bold)),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   @override
   void dispose() {
     _timer?.cancel();
-    _sensorSubscription.cancel();
+    _connection?.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    String statusNyeri = _intensitasTerakhir >= 70 ? "Berat" : (_intensitasTerakhir >= 30 ? "Sedang" : "Ringan");
+    double maxEmgData = _emgHistory.isEmpty ? 2.0 : _emgHistory.reduce(math.max);
+    double dynamicChartMax = maxEmgData < 2.0 ? 2.0 : maxEmgData * 1.3; 
 
     return Scaffold(
       backgroundColor: const Color(0xFFFAFAFA),
@@ -144,7 +316,7 @@ class _MainScreenState extends State<MainScreen> {
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text("DismenoreCare", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.black87)),
+                      const Text("Terapi Asyik", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.black87)),
                       const SizedBox(height: 4),
                       Text(_isSesiAktif ? "Sesi berlangsung" : "Siap dimulai", style: TextStyle(fontSize: 14, color: Colors.grey.shade700)),
                     ],
@@ -153,7 +325,7 @@ class _MainScreenState extends State<MainScreen> {
                     children: [
                       const Icon(Icons.bluetooth, color: Colors.black87, size: 20),
                       const SizedBox(width: 6),
-                      Container(width: 10, height: 10, decoration: const BoxDecoration(color: Color(0xFF00BFA5), shape: BoxShape.circle)),
+                      Container(width: 10, height: 10, decoration: BoxDecoration(color: _isSesiAktif ? const Color(0xFF00BFA5) : Colors.grey, shape: BoxShape.circle)),
                     ],
                   ),
                 ],
@@ -178,12 +350,30 @@ class _MainScreenState extends State<MainScreen> {
                               Text(_formatWaktu(_detikBerjalan), style: const TextStyle(fontSize: 32, fontWeight: FontWeight.w600, color: Color(0xFF4A0024))),
                             ],
                           ),
-                          const Column(
+                          Column(
                             crossAxisAlignment: CrossAxisAlignment.end,
                             children: [
-                              Text("Target", style: TextStyle(color: Color(0xFF882956), fontSize: 14)),
-                              SizedBox(height: 4),
-                              Text("20:00", style: TextStyle(fontSize: 18, fontWeight: FontWeight.w500, color: Color(0xFF4A0024))),
+                              const Text("Target", style: TextStyle(color: Color(0xFF882956), fontSize: 14)),
+                              
+                              // DROPDOWN UNTUK MEMILIH TIMER (Hanya bisa diubah saat sesi belum mulai)
+                              DropdownButton<int>(
+                                value: _targetMenit,
+                                underline: const SizedBox(), // Menghilangkan garis bawah bawaan
+                                icon: const Icon(Icons.keyboard_arrow_down, color: Color(0xFF4A0024)),
+                                items: [20, 40, 60].map((int value) {
+                                  return DropdownMenuItem<int>(
+                                    value: value,
+                                    child: Text("$value:00", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w500, color: Color(0xFF4A0024))),
+                                  );
+                                }).toList(),
+                                onChanged: _isSesiAktif ? null : (int? newValue) {
+                                  if (newValue != null) {
+                                    setState(() {
+                                      _targetMenit = newValue;
+                                    });
+                                  }
+                                },
+                              )
                             ],
                           )
                         ],
@@ -206,22 +396,57 @@ class _MainScreenState extends State<MainScreen> {
                               Container(
                                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                                 decoration: BoxDecoration(color: _lightPink, borderRadius: BorderRadius.circular(10)),
-                                child: Text(statusNyeri, style: const TextStyle(color: Color(0xFF882956), fontSize: 13, fontWeight: FontWeight.bold)),
+                                child: Text(_statusNyeriIoT, style: const TextStyle(color: Color(0xFF882956), fontSize: 13, fontWeight: FontWeight.bold)),
                               ),
                             ],
                           ),
                           const SizedBox(height: 25),
                           
-                          // GRAFIK DINAMIS REALTIME
                           SizedBox(
-                            height: 60, width: double.infinity,
+                            height: 70, width: double.infinity,
                             child: CustomPaint(
-                              painter: RealtimeChartPainter(data: _emgHistory, color: _primaryColor, maxValue: 1.5),
+                              painter: RealtimeChartPainter(data: _emgHistory, color: _primaryColor, maxValue: dynamicChartMax),
                             ),
                           ),
                           
-                          const SizedBox(height: 25),
+                          const SizedBox(height: 15),
                           Text("RMS: ${_emgRmsTerakhir.toStringAsFixed(2)} mV", style: TextStyle(color: Colors.grey.shade600, fontSize: 14)),
+                          
+                          const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 12.0),
+                            child: Divider(),
+                          ),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text("Tingkat Nyeri", style: TextStyle(color: Colors.grey.shade700, fontSize: 13)),
+                              Text("$_skalaNyeri / 10", style: TextStyle(color: _primaryColor, fontSize: 14, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: List.generate(10, (index) {
+                              int step = index + 1;
+                              bool isActive = step <= _skalaNyeri;
+                              
+                              Color stepColor;
+                              if (step <= 3) stepColor = const Color(0xFF4CAF50);
+                              else if (step <= 6) stepColor = Colors.orange;
+                              else stepColor = Colors.red;
+                              
+                              return Expanded(
+                                child: Container(
+                                  margin: EdgeInsets.only(right: step == 10 ? 0 : 4),
+                                  height: 8,
+                                  decoration: BoxDecoration(
+                                    color: isActive ? stepColor : Colors.grey.shade200,
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                ),
+                              );
+                            }),
+                          ),
                         ],
                       ),
                     ),
@@ -244,7 +469,7 @@ class _MainScreenState extends State<MainScreen> {
                                 const SizedBox(height: 12),
                                 ClipRRect(
                                   borderRadius: BorderRadius.circular(10),
-                                  child: LinearProgressIndicator(value: _suhuTerakhir / 60.0, minHeight: 8, backgroundColor: _lightPink, color: _primaryColor),
+                                  child: LinearProgressIndicator(value: _suhuTerakhir / 55.0, minHeight: 8, backgroundColor: _lightPink, color: _primaryColor),
                                 ),
                               ],
                             ),
@@ -261,7 +486,7 @@ class _MainScreenState extends State<MainScreen> {
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text("Intensitas (fuzzy)", style: TextStyle(color: Colors.grey.shade700, fontSize: 13)),
+                                Text("Intensitas", style: TextStyle(color: Colors.grey.shade700, fontSize: 13)),
                                 const SizedBox(height: 8),
                                 Text("$_intensitasTerakhir%", style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
                                 const SizedBox(height: 12),
@@ -286,7 +511,7 @@ class _MainScreenState extends State<MainScreen> {
                 width: double.infinity, height: 55,
                 child: ElevatedButton(
                   style: ElevatedButton.styleFrom(backgroundColor: _primaryColor, shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), elevation: 0),
-                  onPressed: _isSesiAktif ? _hentikanSesi : _mulaiSesi,
+                  onPressed: _isSesiAktif ? () => _hentikanSesi(otomatis: false) : _mulaiSesi,
                   child: Text(_isSesiAktif ? "Hentikan sesi" : "Mulai Sesi", style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white)),
                 ),
               ),
@@ -298,7 +523,7 @@ class _MainScreenState extends State<MainScreen> {
   }
 }
 
-// LOGIKA PENGGAMBARAN GRAFIK DINAMIS DARI ARRAY
+// LOGIKA PENGGAMBARAN GRAFIK DINAMIS DENGAN FILL GRADIENT
 class RealtimeChartPainter extends CustomPainter {
   final List<double> data;
   final Color color;
@@ -310,14 +535,22 @@ class RealtimeChartPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     if (data.isEmpty) return;
 
-    final paint = Paint()
+    final paintLine = Paint()
       ..color = color
       ..strokeWidth = 2.5
       ..style = PaintingStyle.stroke
       ..strokeJoin = StrokeJoin.round;
 
+    final fillPaint = Paint()
+      ..shader = LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: [color.withOpacity(0.4), color.withOpacity(0.0)],
+      ).createShader(Rect.fromLTWH(0, 0, size.width, size.height))
+      ..style = PaintingStyle.fill;
+
     final path = Path();
-    double stepX = size.width / (30 - 1); // Mengasumsikan max 30 titik
+    double stepX = size.width / (30 - 1); 
 
     for (int i = 0; i < data.length; i++) {
       double x = i * stepX;
@@ -330,14 +563,20 @@ class RealtimeChartPainter extends CustomPainter {
         path.lineTo(x, y);
       }
     }
-    canvas.drawPath(path, paint);
+    
+    final fillPath = Path.from(path);
+    fillPath.lineTo(size.width, size.height);
+    fillPath.lineTo(0, size.height);
+    fillPath.close();
+    
+    canvas.drawPath(fillPath, fillPaint);
+    canvas.drawPath(path, paintLine);
 
-    // Titik bulat di akhir grafik
     double lastNormY = (data.last / maxValue).clamp(0.0, 1.0);
     double lastY = size.height - (lastNormY * size.height);
     canvas.drawCircle(Offset((data.length - 1) * stepX, lastY), 4, Paint()..color = color);
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => true; // Harus True agar animasi jalan
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true; 
 }

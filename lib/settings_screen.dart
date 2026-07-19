@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:app_settings/app_settings.dart';
-import 'package:flutter_blue_plus/flutter_blue_plus.dart'; // Pastikan plugin ini ada di pubspec.yaml
+import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -9,7 +9,8 @@ class SettingsScreen extends StatefulWidget {
   State<SettingsScreen> createState() => _SettingsScreenState();
 }
 
-class _SettingsScreenState extends State<SettingsScreen> {
+// 1. TAMBAHKAN 'with WidgetsBindingObserver' di sini
+class _SettingsScreenState extends State<SettingsScreen> with WidgetsBindingObserver {
   String _statusKoneksi = "Mengecek...";
   String _namaPerangkat = "-";
   String _macAddress = "-";
@@ -19,40 +20,73 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void initState() {
     super.initState();
+    // 2. Daftarkan observer saat halaman dibuka
+    WidgetsBinding.instance.addObserver(this);
     _cekStatusBluetooth();
   }
 
-  // Logika dinamis untuk mengecek perangkat yang terhubung
+  @override
+  void dispose() {
+    // 3. Hapus observer saat halaman ditutup agar tidak memory leak
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  // 4. Fungsi ini otomatis berjalan saat kamu kembali ke aplikasi dari pengaturan HP
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // Saat aplikasi aktif kembali, cek ulang status Bluetooth!
+      _cekStatusBluetooth();
+    }
+  }
+
   Future<void> _cekStatusBluetooth() async {
-    bool isEnabled = await FlutterBluePlus.isSupported;
-    if (!isEnabled) {
-      setState(() => _statusKoneksi = "Tidak didukung");
+    // Mengecek apakah bluetooth aktif
+    bool? isEnabled = await FlutterBluetoothSerial.instance.isEnabled;
+    if (isEnabled == null || !isEnabled) {
+      if (mounted) {
+        setState(() {
+          _isConnected = false;
+          _statusKoneksi = "Bluetooth Mati";
+          _namaPerangkat = "-";
+          _macAddress = "-";
+        });
+      }
       return;
     }
 
-    // Mengambil daftar perangkat yang sudah terhubung (bonded)
-    List<BluetoothDevice> connectedDevices = await FlutterBluePlus.connectedDevices;
-    
-    // Mencari perangkat dengan nama target "DysmenoCare"[cite: 3]
-    var targetDevice = connectedDevices.firstWhere(
-      (d) => d.platformName.contains("DysmenoCare"), 
-      orElse: () => BluetoothDevice(remoteId: const DeviceIdentifier("00:00:00:00:00:00"))
-    );
+    try {
+      // Mengambil daftar perangkat Bluetooth Classic yang sudah di-pairing di HP
+      List<BluetoothDevice> bondedDevices = await FlutterBluetoothSerial.instance.getBondedDevices();
+      
+      // Mencari perangkat dengan nama "ESP32_Heater_Fuzzy"
+      var targetDevice = bondedDevices.firstWhere(
+        (d) => d.name != null && d.name!.contains("ESP32_Heater_Fuzzy"), 
+        orElse: () => BluetoothDevice(address: "00:00:00:00:00:00") // Dummy jika tidak ketemu
+      );
 
-    if (targetDevice.remoteId.str != "00:00:00:00:00:00") {
-      setState(() {
-        _isConnected = true;
-        _statusKoneksi = "Terhubung";
-        _namaPerangkat = targetDevice.platformName;
-        _macAddress = targetDevice.remoteId.str;
-      });
-    } else {
-      setState(() {
-        _isConnected = false;
-        _statusKoneksi = "Terputus";
-        _namaPerangkat = "-";
-        _macAddress = "-";
-      });
+      if (targetDevice.address != "00:00:00:00:00:00") {
+        if (mounted) {
+          setState(() {
+            _isConnected = true;
+            _statusKoneksi = targetDevice.isConnected ? "Terhubung" : "Disandingkan (Paired)";
+            _namaPerangkat = targetDevice.name ?? "ESP32_Heater_Fuzzy";
+            _macAddress = targetDevice.address;
+          });
+        }
+      } else {
+        if (mounted) {
+          setState(() {
+            _isConnected = false;
+            _statusKoneksi = "Tidak ditemukan";
+            _namaPerangkat = "-";
+            _macAddress = "-";
+          });
+        }
+      }
+    } catch (e) {
+      print("Error baca bluetooth: $e");
     }
   }
 
@@ -97,11 +131,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(_namaPerangkat, style: const TextStyle(fontWeight: FontWeight.bold)),
-                              Text(_isConnected ? "Perangkat terhubung" : "Tidak ada perangkat", style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                              Text(_isConnected ? "Perangkat terdeteksi" : "Tidak ada perangkat", style: const TextStyle(fontSize: 12, color: Colors.grey)),
                             ],
                           ),
                           const Spacer(),
-                          if (_isConnected)
+                          if (_isConnected && _statusKoneksi == "Terhubung")
                             Container(
                               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                               decoration: BoxDecoration(color: Colors.green.shade50, borderRadius: BorderRadius.circular(6)),
@@ -113,7 +147,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     const Divider(height: 1),
                     
                     // Info Rows
-                    _buildInfoRow(Icons.settings_input_component, "Status koneksi", _statusKoneksi, isStatus: true),
+                    _buildInfoRow(Icons.settings_input_component, "Status koneksi", _statusKoneksi, isStatus: _statusKoneksi == "Terhubung"),
                     _buildInfoRow(Icons.smartphone, "Nama perangkat", _namaPerangkat),
                     _buildInfoRow(Icons.bluetooth_searching, "Alamat Bluetooth", _macAddress),
                     
@@ -133,7 +167,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             padding: const EdgeInsets.symmetric(vertical: 14),
                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                           ),
-                          child: Text(_isConnected ? "Putuskan koneksi" : "Hubungkan koneksi"),
+                          child: const Text("Buka Pengaturan Bluetooth"),
                         ),
                       ),
                     ),

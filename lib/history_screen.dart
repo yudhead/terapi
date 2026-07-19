@@ -143,6 +143,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
             const SizedBox(height: 16),
 
             // LIST VIEW
+// LIST VIEW
             Expanded(
               child: ListView.builder(
                 padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 8),
@@ -160,6 +161,12 @@ class _HistoryScreenState extends State<HistoryScreen> {
                   double emgValue = double.tryParse(item.emg.replaceAll(RegExp(r'[^0-9.]'), '')) ?? 0.5;
                   double suhuValue = double.tryParse(item.suhu.replaceAll(RegExp(r'[^0-9.]'), '')) ?? 40.0;
 
+                  // 1. ASUMSI: Anda memiliki variabel waktu di RiwayatModel (contoh: "14:30")
+                  // Jika nama variabel di model Anda berbeda, silakan sesuaikan (misal: item.jam)
+                  // String waktuSelesai = ""; 
+                  // Jika item memiliki properti waktu:
+                  String waktuSelesai = item.waktu;
+
                   return Container(
                     margin: const EdgeInsets.only(bottom: 16),
                     padding: const EdgeInsets.all(16),
@@ -175,7 +182,11 @@ class _HistoryScreenState extends State<HistoryScreen> {
                           children: [
                             Icon(Icons.calendar_today_outlined, size: 16, color: _primary),
                             const SizedBox(width: 8),
-                            Text(item.tanggal, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+                            // 2. TAMPILKAN WAKTU DI SEBELAH TANGGAL
+                            Text(
+                              waktuSelesai.isNotEmpty ? "${item.tanggal} • $waktuSelesai" : item.tanggal, 
+                              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)
+                            ),
                             const Spacer(),
                             Icon(Icons.chevron_right, color: _primary),
                           ],
@@ -198,10 +209,14 @@ class _HistoryScreenState extends State<HistoryScreen> {
                                   const SizedBox(height: 16),
                                   _buildInfoItem(Icons.thermostat, "Suhu", "${item.suhu.contains("°C") ? item.suhu : "${item.suhu}°C"}", "Rata-rata", _primary),
                                   const SizedBox(height: 16),
+                                  // 3. TAMBAHKAN WAKTU PADA LABEL SELESAI
                                   Container(
                                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                                     decoration: BoxDecoration(color: Colors.green.shade50, borderRadius: BorderRadius.circular(6)),
-                                    child: const Text("SELESAI", style: TextStyle(color: Colors.green, fontSize: 10, fontWeight: FontWeight.bold)),
+                                    child: Text(
+                                      waktuSelesai.isNotEmpty ? "SELESAI PADA $waktuSelesai" : "SELESAI", 
+                                      style: const TextStyle(color: Colors.green, fontSize: 10, fontWeight: FontWeight.bold)
+                                    ),
                                   )
                                 ],
                               ),
@@ -209,6 +224,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
                             
                             // RIGHT COLUMN (Charts)
                             Expanded(
+                              // ... KODE CHART TETAP SAMA ...
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
