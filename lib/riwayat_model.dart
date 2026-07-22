@@ -5,6 +5,7 @@ class RiwayatModel {
   final String statusNyeri;
   final String suhu;
   final String waktu;
+  final String waktuMulai; // 1. Sudah ada
 
   RiwayatModel({
     this.tanggal = "",
@@ -12,7 +13,8 @@ class RiwayatModel {
     this.emg = "",
     this.statusNyeri = "Ringan",
     this.suhu = "0.0°C",
-    this.waktu = "", // 1. Tambahkan waktu di sini
+    this.waktu = "",
+    this.waktuMulai = "", // 2. TAMBAHKAN WAKTU MULAI DI SINI
   });
 
   // Fungsi untuk mengubah data dari Firebase (Map) menjadi Objek Dart
@@ -23,7 +25,8 @@ class RiwayatModel {
       emg: map['emg']?.toString() ?? "",
       statusNyeri: map['statusNyeri']?.toString() ?? "Ringan",
       suhu: map['suhu']?.toString() ?? "0.0°C",
-      waktu: map['waktu']?.toString() ?? "", // 2. Tambahkan mapping waktu dari Firebase ke sini
+      waktu: map['waktu']?.toString() ?? map['waktuSelesai']?.toString() ?? "", 
+      waktuMulai: map['waktuMulai']?.toString() ?? "", // 3. AMBIL DATA WAKTU MULAI DARI FIREBASE
     );
   }
 }

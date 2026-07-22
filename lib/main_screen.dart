@@ -28,13 +28,11 @@ class _MainScreenState extends State<MainScreen> {
   DateTime? _waktuMulaiTerapi;
   
   // Variabel untuk Target Waktu Timer (Default 20 menit)
-  int _targetMenit = 20; 
+  int _targetMenit = 1; 
 
   double _suhuTerakhir = 0.0;
   double _emgRmsTerakhir = 0.0;
-  int _intensitasTerakhir = 0; 
   String _statusNyeriIoT = "Tidak Nyeri";
-  int _skalaNyeri = 1; 
   
   List<double> _emgHistory = []; 
 
@@ -63,21 +61,16 @@ class _MainScreenState extends State<MainScreen> {
     try {
       if (line.contains("Suhu:") && line.contains("EMG:")) {
         List<String> parts = line.split('|');
-        if (parts.length >= 4) {
+        if (parts.length >= 3) {
           String suhuStr = parts[0].replaceAll(RegExp(r'[^0-9.]'), '');
           String emgStr = parts[1].replaceAll(RegExp(r'[^0-9.]'), '');
           String statusStr = parts[2].replaceAll("Status:", "").trim();
-          String pwmStr = parts[3].replaceAll(RegExp(r'[^0-9.]'), '');
 
           if (mounted) {
             setState(() {
               _suhuTerakhir = double.tryParse(suhuStr) ?? 0.0;
               _emgRmsTerakhir = double.tryParse(emgStr) ?? 0.0;
               _statusNyeriIoT = statusStr;
-              
-              int pwm = int.tryParse(pwmStr) ?? 0;
-              _intensitasTerakhir = ((pwm / 255.0) * 100).toInt();
-              _skalaNyeri = (_intensitasTerakhir / 10.0).ceil().clamp(1, 10);
 
               _emgHistory.add(_emgRmsTerakhir);
               if (_emgHistory.length > 30) {
@@ -92,7 +85,7 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
-void _mulaiSesi() async {
+  void _mulaiSesi() async {
     // 1. MINTA IZIN BLUETOOTH SECARA PAKSA KE HP (WAJIB UNTUK ANDROID 12+)
     Map<Permission, PermissionStatus> statuses = await [
       Permission.bluetoothConnect,
@@ -140,7 +133,7 @@ void _mulaiSesi() async {
       _connection!.output.add(Uint8List.fromList(utf8.encode("START\n")));
       await _connection!.output.allSent;
       
-BluetoothConnection activeConnection = _connection!;
+      BluetoothConnection activeConnection = _connection!;
       
       activeConnection.input!.listen(_onDataReceived).onDone(() {
          // Pastikan event onDone ini BUKAN dari sisa koneksi lama yang nyangkut
@@ -154,10 +147,12 @@ BluetoothConnection activeConnection = _connection!;
         if (mounted) {
           setState(() { 
             _detikBerjalan++; 
-            if (_detikBerjalan >= _targetMenit * 60) {
-              _hentikanSesi(otomatis: true);
-            }
           });
+          
+          // PINDAHKAN PENGECEKAN INI KE LUAR SETSTATE
+          if (_detikBerjalan >= _targetMenit * 60) {
+            _hentikanSesi(otomatis: true);
+          }
         }
       });
       
@@ -173,33 +168,26 @@ BluetoothConnection activeConnection = _connection!;
       ));
     }
   }
-  // Menambahkan parameter 'otomatis' untuk membedakan dihentikan user vs waktu habis
-void _hentikanSesi({bool otomatis = false}) async {
-    // 1. AMANKAN DATA SEGERA (Jangan tunggu Bluetooth terputus!)
+
+  void _hentikanSesi({bool otomatis = false}) async {
+    // 1. CEGAH PEMANGGILAN GANDA (Gembok utama agar fungsi tidak berjalan 2x)
+    if (!_isSesiAktif) return;
+
+    // 2. LANGSUNG MATIKAN STATUS AKTIF
+    // Ini memastikan timer atau bluetooth tidak bisa memanggil fungsi ini lagi
+    setState(() {
+      _isSesiAktif = false;
+    });
+
+    // 3. Amankan data sebelum terhapus
     int durasiFinal = _detikBerjalan; 
+    DateTime? waktuMulaiFinal = _waktuMulaiTerapi; 
     
-    // 2. Matikan timer
+    // 4. Matikan timer
     _timer?.cancel();
     _timer = null;
 
-    // 3. Simpan ke Firebase langsung menggunakan durasi yang diamankan
-    _simpanKeRiwayat(durasiFinal: durasiFinal, otomatis: otomatis);
-
-    // 4. Reset UI segera agar tombol kembali ke "Mulai Sesi" dengan mulus
-    if (mounted) {
-      setState(() {
-        _isSesiAktif = false;
-        _detikBerjalan = 0;
-        _emgHistory.clear(); 
-        _suhuTerakhir = 0.0;
-        _emgRmsTerakhir = 0.0;
-        _intensitasTerakhir = 0;
-        _skalaNyeri = 1;
-        _waktuMulaiTerapi = null; // Cegah data nyangkut ke sesi berikutnya
-      });
-    }
-
-    // 5. Putus koneksi IoT di latar belakang
+    // 5. Putus koneksi IoT sesegera mungkin di latar belakang
     try {
       if (_connection != null && _connection!.isConnected) {
         _connection!.output.add(Uint8List.fromList(utf8.encode("STOP\n")));
@@ -208,47 +196,47 @@ void _hentikanSesi({bool otomatis = false}) async {
     } catch (e) {
       debugPrint("Gagal kirim perintah STOP: $e");
     } finally {
-      // Gunakan dispose() agar langsung diputus paksa tanpa loading
       _connection?.dispose(); 
       _connection = null;
     }
-  }
-String _formatWaktu(int totalDetik) {
-    int jam = totalDetik ~/ 3600;
-    int menit = (totalDetik % 3600) ~/ 60;
-    int detik = totalDetik % 60;
-    return '${jam.toString().padLeft(2, '0')}:${menit.toString().padLeft(2, '0')}:${detik.toString().padLeft(2, '0')}';
-  }
 
-// Tambahkan parameter 'durasiFinal' yang wajib diisi (required)
-  Future<void> _simpanKeRiwayat({required int durasiFinal, bool otomatis = false}) async {
-    print("DEBUG: Fungsi simpan dipanggil. WaktuMulai: $_waktuMulaiTerapi");
+    // 6. SIMPAN DATA (Tunggu sampai benar-benar masuk ke Firebase)
+    await _simpanKeRiwayat(durasiFinal: durasiFinal, waktuMulai: waktuMulaiFinal, otomatis: otomatis);
 
-    if (_waktuMulaiTerapi == null) {
-      print("DEBUG: Gagal! _waktuMulaiTerapi null.");
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Error: Waktu mulai tidak terekam!")));
-      return;
+    // 7. Bersihkan angka di layar SETELAH data aman tersimpan
+    if (mounted) {
+      setState(() {
+        _detikBerjalan = 0;
+        _emgHistory.clear(); 
+        _suhuTerakhir = 0.0;
+        _emgRmsTerakhir = 0.0;
+        _waktuMulaiTerapi = null;
+      });
     }
+  }
 
-    String tanggalTeks = DateFormat("dd MMM yyyy", "id_ID").format(_waktuMulaiTerapi!);
-    // AMBIL WAKTU SAAT INI SEBAGAI WAKTU SELESAI
-    String waktuSelesai = DateFormat("HH:mm", "id_ID").format(DateTime.now()); 
+Future<void> _simpanKeRiwayat({required int durasiFinal, DateTime? waktuMulai, bool otomatis = false}) async {
+    if (waktuMulai == null) return;
+
+    // Karena di main.dart kamu sudah set 'id_ID', kita bisa menggunakannya dengan aman di sini
+    String tanggalTeks = DateFormat("dd MMM yyyy", "id_ID").format(waktuMulai);
+    String waktuMulaiTeks = DateFormat("HH:mm", "id_ID").format(waktuMulai);
+    String waktuSelesaiTeks = DateFormat("HH:mm", "id_ID").format(DateTime.now()); 
     String durasiTeks = _formatWaktu(durasiFinal);
     
     Map<String, dynamic> dataRiwayat = {
       "tanggal": tanggalTeks,
-      "waktu": waktuSelesai, // <--- TAMBAHKAN INI
+      "waktuMulai": waktuMulaiTeks,     // <--- Simpan waktu mulai
+      "waktuSelesai": waktuSelesaiTeks, 
       "durasi": durasiTeks,
       "emg": _emgRmsTerakhir.toString(),
       "suhu": _suhuTerakhir.toString(),
       "statusNyeri": _statusNyeriIoT
     };
 
-    print("DEBUG: Mencoba kirim ke $_riwayatRef dengan data: $dataRiwayat");
-
     try {
-      await _riwayatRef.push().set(dataRiwayat);
-      print("DEBUG: Berhasil push ke Firebase!");
+      // KITA TAMBAHKAN TIMEOUT 7 DETIK AGAR TIDAK NYANGKUT SELAMANYA
+      await _riwayatRef.push().set(dataRiwayat).timeout(const Duration(seconds: 7));
       
       if (mounted) {
         if (otomatis) {
@@ -257,13 +245,28 @@ String _formatWaktu(int totalDetik) {
           ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Sesi dihentikan dan disimpan ke Riwayat")));
         }
       }
-    } catch (error) {
-      print("DEBUG: Gagal push: $error");
+    } on TimeoutException catch (_) {
+      // JIKA 7 DETIK GAGAL, MUNCULKAN PESAN MERAH INI
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Gagal: $error")));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Gagal: Koneksi Firebase terputus/ditolak!"), backgroundColor: Colors.red)
+        );
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Error Sistem: $error"), backgroundColor: Colors.red));
       }
     }
   }
+
+  String _formatWaktu(int totalDetik) {
+    int jam = totalDetik ~/ 3600;
+    int menit = (totalDetik % 3600) ~/ 60;
+    int detik = totalDetik % 60;
+    return '${jam.toString().padLeft(2, '0')}:${menit.toString().padLeft(2, '0')}:${detik.toString().padLeft(2, '0')}';
+  }
+
+  
   // Fungsi untuk menampilkan Pop-up saat timer habis
   void _tampilkanDialogSelesai() {
     showDialog(
@@ -316,7 +319,7 @@ String _formatWaktu(int totalDetik) {
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text("Terapi Asyik", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.black87)),
+                      const Text("Terapi dismenore", style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.black87)),
                       const SizedBox(height: 4),
                       Text(_isSesiAktif ? "Sesi berlangsung" : "Siap dimulai", style: TextStyle(fontSize: 14, color: Colors.grey.shade700)),
                     ],
@@ -360,7 +363,7 @@ String _formatWaktu(int totalDetik) {
                                 value: _targetMenit,
                                 underline: const SizedBox(), // Menghilangkan garis bawah bawaan
                                 icon: const Icon(Icons.keyboard_arrow_down, color: Color(0xFF4A0024)),
-                                items: [20, 40, 60].map((int value) {
+                                items: [1, 2, 3].map((int value) {
                                   return DropdownMenuItem<int>(
                                     value: value,
                                     child: Text("$value:00", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w500, color: Color(0xFF4A0024))),
@@ -411,94 +414,32 @@ String _formatWaktu(int totalDetik) {
                           
                           const SizedBox(height: 15),
                           Text("RMS: ${_emgRmsTerakhir.toStringAsFixed(2)} mV", style: TextStyle(color: Colors.grey.shade600, fontSize: 14)),
-                          
-                          const Padding(
-                            padding: EdgeInsets.symmetric(vertical: 12.0),
-                            child: Divider(),
-                          ),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              Text("Tingkat Nyeri", style: TextStyle(color: Colors.grey.shade700, fontSize: 13)),
-                              Text("$_skalaNyeri / 10", style: TextStyle(color: _primaryColor, fontSize: 14, fontWeight: FontWeight.bold)),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: List.generate(10, (index) {
-                              int step = index + 1;
-                              bool isActive = step <= _skalaNyeri;
-                              
-                              Color stepColor;
-                              if (step <= 3) stepColor = const Color(0xFF4CAF50);
-                              else if (step <= 6) stepColor = Colors.orange;
-                              else stepColor = Colors.red;
-                              
-                              return Expanded(
-                                child: Container(
-                                  margin: EdgeInsets.only(right: step == 10 ? 0 : 4),
-                                  height: 8,
-                                  decoration: BoxDecoration(
-                                    color: isActive ? stepColor : Colors.grey.shade200,
-                                    borderRadius: BorderRadius.circular(4),
-                                  ),
-                                ),
-                              );
-                            }),
-                          ),
                         ],
                       ),
                     ),
                     const SizedBox(height: 16),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Container(
-                            padding: const EdgeInsets.all(20),
-                            decoration: BoxDecoration(
-                              color: Colors.white, borderRadius: BorderRadius.circular(20),
-                              boxShadow: [BoxShadow(color: Colors.grey.withOpacity(0.08), blurRadius: 15, offset: const Offset(0, 5))],
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text("Suhu pemanas", style: TextStyle(color: Colors.grey.shade700, fontSize: 13)),
-                                const SizedBox(height: 8),
-                                Text("$_suhuTerakhir°C", style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-                                const SizedBox(height: 12),
-                                ClipRRect(
-                                  borderRadius: BorderRadius.circular(10),
-                                  child: LinearProgressIndicator(value: _suhuTerakhir / 55.0, minHeight: 8, backgroundColor: _lightPink, color: _primaryColor),
-                                ),
-                              ],
-                            ),
+                    
+                    // KOTAK SUHU PEMANAS (Sekarang full-width tanpa intensitas)
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(
+                        color: Colors.white, borderRadius: BorderRadius.circular(20),
+                        boxShadow: [BoxShadow(color: Colors.grey.withOpacity(0.08), blurRadius: 15, offset: const Offset(0, 5))],
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text("Suhu pemanas", style: TextStyle(color: Colors.grey.shade700, fontSize: 13)),
+                          const SizedBox(height: 8),
+                          Text("$_suhuTerakhir°C", style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 12),
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(10),
+                            child: LinearProgressIndicator(value: _suhuTerakhir / 55.0, minHeight: 8, backgroundColor: _lightPink, color: _primaryColor),
                           ),
-                        ),
-                        const SizedBox(width: 16),
-                        Expanded(
-                          child: Container(
-                            padding: const EdgeInsets.all(20),
-                            decoration: BoxDecoration(
-                              color: Colors.white, borderRadius: BorderRadius.circular(20),
-                              boxShadow: [BoxShadow(color: Colors.grey.withOpacity(0.08), blurRadius: 15, offset: const Offset(0, 5))],
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text("Intensitas", style: TextStyle(color: Colors.grey.shade700, fontSize: 13)),
-                                const SizedBox(height: 8),
-                                Text("$_intensitasTerakhir%", style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
-                                const SizedBox(height: 12),
-                                ClipRRect(
-                                  borderRadius: BorderRadius.circular(10),
-                                  child: LinearProgressIndicator(value: _intensitasTerakhir / 100.0, minHeight: 8, backgroundColor: _lightPink, color: _primaryColor),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                     const SizedBox(height: 30),
                   ],

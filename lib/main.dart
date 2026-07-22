@@ -20,7 +20,7 @@ class DismenoreCareApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Terapi Asyik',
+      title: 'Terapi Dismenore',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         primaryColor: const Color(0xFFC2185B), 
@@ -56,7 +56,13 @@ class _MainNavigationState extends State<MainNavigation> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: _pages[_selectedIndex],
+      // 1. UBAH BAGIAN BODY INI MENGGUNAKAN IndexedStack
+      body: IndexedStack(
+        index: _selectedIndex,
+        children: _pages,
+      ),
+      
+      // Bagian bawah tetap sama
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: _selectedIndex,
         onTap: _onItemTapped,

@@ -29,7 +29,7 @@ class _HistoryScreenState extends State<HistoryScreen> {
     _ambilDataRiwayat();
   }
 
-  void _ambilDataRiwayat() {
+void _ambilDataRiwayat() {
     _riwayatRef.onValue.listen((event) {
       if (event.snapshot.value != null) {
         Map<dynamic, dynamic> values = event.snapshot.value as Map<dynamic, dynamic>;
@@ -38,7 +38,21 @@ class _HistoryScreenState extends State<HistoryScreen> {
           tempList.add(RiwayatModel.fromMap(value));
         });
         
-        tempList = tempList.reversed.toList();
+        // URUTKAN BERDASARKAN TANGGAL DAN WAKTU TERBARU
+        tempList.sort((a, b) {
+          // Menggabungkan tanggal dan waktu mulai/selesai untuk dibandingkan
+          // Format tanggal di data: "dd MMM yyyy" (contoh: "15 Jun 2026")
+          // Karena format teks langsung sulit di-sort, kita bisa balik atau parse jika formatnya standar,
+          // Tapi karena Anda sudah membalik list menggunakan .reversed di bawah, 
+          // pastikan data dari Firebase masuk secara berurutan dari yang lama ke baru, 
+          // atau gunakan logika DateTime di bawah ini agar 100% akurat:
+          
+          String strA = "${a.tanggal} ${a.waktuMulai.isNotEmpty ? a.waktuMulai : a.waktu}";
+          String strB = "${b.tanggal} ${b.waktuMulai.isNotEmpty ? b.waktuMulai : b.waktu}";
+          
+          return strB.compareTo(strA); // Urutkan descending (terbaru di atas)
+        });
+
         if (mounted) {
           setState(() {
             _fullListRiwayat = tempList;
@@ -194,69 +208,90 @@ class _HistoryScreenState extends State<HistoryScreen> {
                         const Padding(padding: EdgeInsets.symmetric(vertical: 8.0), child: Divider()),
                         
                         // Card Body
-                        Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            // LEFT COLUMN (Info)
-                            SizedBox(
-                              width: 120,
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  _buildInfoItem(Icons.show_chart, "EMG", "${item.emg.contains("mV") ? item.emg : "${item.emg} mV"}", "(RMS)", _primary),
-                                  const SizedBox(height: 16),
-                                  _buildInfoItem(statusIcon, "Status nyeri", item.statusNyeri, "• $subtitleNyeri", statusColor),
-                                  const SizedBox(height: 16),
-                                  _buildInfoItem(Icons.thermostat, "Suhu", "${item.suhu.contains("°C") ? item.suhu : "${item.suhu}°C"}", "Rata-rata", _primary),
-                                  const SizedBox(height: 16),
-                                  // 3. TAMBAHKAN WAKTU PADA LABEL SELESAI
+Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // LEFT COLUMN (Info)
+                          SizedBox(
+                            width: 120,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                _buildInfoItem(Icons.show_chart, "EMG", "${item.emg.contains("mV") ? item.emg : "${item.emg} mV"}", "(RMS)", _primary),
+                                const SizedBox(height: 16),
+                                _buildInfoItem(statusIcon, "Status nyeri", item.statusNyeri, "• $subtitleNyeri", statusColor),
+                                const SizedBox(height: 16),
+                                _buildInfoItem(Icons.thermostat, "Suhu", "${item.suhu.contains("°C") ? item.suhu : "${item.suhu}°C"}", "Rata-rata", _primary),
+                                const SizedBox(height: 16),
+                                
+// 3. TAMPILKAN WAKTU MULAI DI ATAS (MENGGUNAKAN item.waktuMulai)
+// 1. TAMPILKAN WAKTU MULAI (Dibuat mirip kotak selesai)
+                                if (item.waktuMulai != null && item.waktuMulai.isNotEmpty) ...[
                                   Container(
                                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                    decoration: BoxDecoration(color: Colors.green.shade50, borderRadius: BorderRadius.circular(6)),
-                                    child: Text(
-                                      waktuSelesai.isNotEmpty ? "SELESAI PADA $waktuSelesai" : "SELESAI", 
-                                      style: const TextStyle(color: Colors.green, fontSize: 10, fontWeight: FontWeight.bold)
+                                    decoration: BoxDecoration(
+                                      color: Colors.grey.shade100, // Warna background kotak mulai
+                                      borderRadius: BorderRadius.circular(6),
+                                      border: Border.all(color: Colors.grey.shade300), // Garis tepi opsional agar lebih rapi
                                     ),
-                                  )
+                                    child: Text(
+                                      "MULAI PADA ${item.waktuMulai}", 
+                                      style: TextStyle(color: Colors.grey.shade700, fontSize: 10, fontWeight: FontWeight.bold)
+                                    ),
+                                  ),
+                                  const SizedBox(height: 6), // Jarak antara kotak mulai dan selesai
                                 ],
-                              ),
+
+                                // 2. Kotak Waktu Selesai di bawahnya
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: Colors.green.shade50, 
+                                    borderRadius: BorderRadius.circular(6)
+                                  ),
+                                  child: Text(
+                                    waktuSelesai.isNotEmpty ? "SELESAI PADA $waktuSelesai" : "SELESAI", 
+                                    style: const TextStyle(color: Colors.green, fontSize: 10, fontWeight: FontWeight.bold)
+                                  ),
+                                )
+                              ],
                             ),
-                            
-                            // RIGHT COLUMN (Charts)
-                            Expanded(
-                              // ... KODE CHART TETAP SAMA ...
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text("EMG (mV)", style: TextStyle(color: _primary, fontSize: 10, fontWeight: FontWeight.bold)),
-                                  const SizedBox(height: 4),
-                                  SizedBox(
-                                    height: 50, width: double.infinity,
-                                    child: CustomPaint(painter: HistoryChartPainter(color: _primary, baseValue: emgValue, isEmg: true)),
-                                  ),
-                                  const Divider(),
-                                  Text("Suhu (°C)", style: TextStyle(color: _primary, fontSize: 10, fontWeight: FontWeight.bold)),
-                                  const SizedBox(height: 4),
-                                  SizedBox(
-                                    height: 50, width: double.infinity,
-                                    child: CustomPaint(painter: HistoryChartPainter(color: _primary, baseValue: suhuValue, isEmg: false)),
-                                  ),
-                                  const SizedBox(height: 4),
-                                  const Row(
-                                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                    children: [
-                                      Text("00:00", style: TextStyle(fontSize: 9, color: Colors.grey)),
-                                      Text("05:00", style: TextStyle(fontSize: 9, color: Colors.grey)),
-                                      Text("10:00", style: TextStyle(fontSize: 9, color: Colors.grey)),
-                                      Text("15:00", style: TextStyle(fontSize: 9, color: Colors.grey)),
-                                      Text("20:00 (menit)", style: TextStyle(fontSize: 9, color: Colors.grey)),
-                                    ],
-                                  )
-                                ],
-                              ),
-                            )
-                          ],
-                        )
+                          ),
+                          
+                          // RIGHT COLUMN (Charts)
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text("EMG (mV)", style: TextStyle(color: _primary, fontSize: 10, fontWeight: FontWeight.bold)),
+                                const SizedBox(height: 4),
+                                SizedBox(
+                                  height: 50, width: double.infinity,
+                                  child: CustomPaint(painter: HistoryChartPainter(color: _primary, baseValue: emgValue, isEmg: true)),
+                                ),
+                                const Divider(),
+                                Text("Suhu (°C)", style: TextStyle(color: _primary, fontSize: 10, fontWeight: FontWeight.bold)),
+                                const SizedBox(height: 4),
+                                SizedBox(
+                                  height: 50, width: double.infinity,
+                                  child: CustomPaint(painter: HistoryChartPainter(color: _primary, baseValue: suhuValue, isEmg: false)),
+                                ),
+                                const SizedBox(height: 4),
+                                const Row(
+                                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    Text("00:00", style: TextStyle(fontSize: 9, color: Colors.grey)),
+                                    Text("05:00", style: TextStyle(fontSize: 9, color: Colors.grey)),
+                                    Text("10:00", style: TextStyle(fontSize: 9, color: Colors.grey)),
+                                    Text("15:00", style: TextStyle(fontSize: 9, color: Colors.grey)),
+                                    Text("20:00 (menit)", style: TextStyle(fontSize: 9, color: Colors.grey)),
+                                  ],
+                                )
+                              ],
+                            ),
+                          )
+                        ],
+                      )
                       ],
                     ),
                   );
